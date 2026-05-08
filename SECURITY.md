@@ -77,14 +77,26 @@ We aim to acknowledge reports within **3 business days** and provide a fix or mi
 
 ### HTML Report Security
 
-- All database field values written into the HTML report are escaped with `html.escape(..., quote=True)` before insertion. This covers all data-attribute values, table cell contents, option element values, and hover title attributes.
+- All database field values written into the HTML report are escaped with `html.escape(..., quote=True)` before insertion. This covers all data-attribute values, table cell contents, option element values, and hover title attributes — including the `raw_event_status` field added in Phase 3b.
 - The generated HTML includes a `Content-Security-Policy` meta tag restricting resource loading to prevent exfiltration via injected markup.
 - A malicious RSC database name containing `<script>` tags will render as escaped text, not execute as JavaScript.
 
-### Error Handling and Information Leakage
+### Audit Trail Integrity
 
+- During Phase 3b (snapshot date inheritance), child objects that lack their own snapshot may have their `event_status` promoted based on a parent cluster's or MongoDB Collection's snapshot date.
+- Before any such mutation, the original status is written to `raw_event_status`. This write happens unconditionally for every record — records not affected by inheritance receive an empty string, while records whose status was derived receive the pre-inheritance value.
+- `raw_event_status` is included in all three report outputs (CSV column, JSON field, HTML table column) so the pre-inheritance protection signal is never silently discarded. Investigators can filter on this field to distinguish genuinely protected databases from those whose status was derived.
+- The inheritance logic uses only hardcoded constant strings (`"Online (Inherited from Parent)"`, `"Online (Via Collections)"`) when mutating `event_status`. No user-controlled or API-sourced data flows into these status strings, eliminating injection risk through this path.
+
+### Memory Safety and Temporary Data
+
+- During Phase 3b, raw GraphQL node data is temporarily attached to each parsed record as `_raw_node` to make `physicalPath` available for parent/child resolution without a second API call.
+- The cleanup of `_raw_node` is performed inside a `try/finally` block in `run_full()`, guaranteeing that raw node data is removed from memory regardless of whether `inherit_snapshot_dates()` raises an exception. This prevents raw GraphQL payloads from persisting in the process beyond Phase 3b in any failure mode.
 - Raw API response bodies are never printed to stdout or stderr. The `_safe_error_message()` helper in `graphql_client.py` extracts only the `message` field from error responses, bounded to 200 characters.
 - Exception strings from `requests` (which may contain full URLs, headers, or partial payloads) are never propagated to user-visible output.
+
+### Error Handling and Information Leakage
+
 - If more than 10% of MSSQL event checks fail during a run, a prominent warning is emitted. This prevents systematic failures — such as lost API permissions or a connectivity disruption — from silently producing zeroed-out event data that looks like healthy results.
 
 ### Dependency Management
@@ -106,9 +118,9 @@ pip-audit -r requirements.txt
 | `.env` | RSC credentials | `.gitignore`, OS file permissions |
 | `db_status_work/raw_fetch_*.json` | Parsed database metadata | `.gitignore`, `chmod 0o600` |
 | `db_status_work/events_*.json` | MSSQL event check results | `.gitignore`, `chmod 0o600` |
-| `db_status_report_*.csv` | Full database status export | `chmod 0o600` |
-| `db_status_report_*.json` | Full database status export | `chmod 0o600` |
-| `db_status_report_*.html` | Interactive HTML dashboard | `chmod 0o600` |
+| `db_status_report_*.csv` | Full database status export (incl. `raw_event_status`) | `chmod 0o600` |
+| `db_status_report_*.json` | Full database status export (incl. `raw_event_status`) | `chmod 0o600` |
+| `db_status_report_*.html` | Interactive HTML dashboard (incl. Raw Status column) | `chmod 0o600` |
 
 > Intermediate files in `db_status_work/` contain raw database metadata fetched from RSC. Treat them with the same sensitivity as the final reports.
 
@@ -121,7 +133,7 @@ This tool is designed for **single-user, trusted-host execution** — a security
 - **The host is trusted.** The tool does not defend against a compromised OS or a malicious local user with access to the work directory.
 - **The RSC instance is trusted.** The tool validates the domain at startup but does not defend against a compromised RSC instance returning malicious data at scale. The HTML escaping mitigates the most practical risk (XSS via database names), but consumers of the JSON and CSV outputs should treat field values as untrusted data in downstream processing.
 - **The `.env` file is protected by the OS.** File permissions and `.gitignore` are the primary controls — not encryption. Do not store `.env` on shared or world-readable filesystems.
-- **Network path to RSC is trusted.** TLS verification is enforced, but the tool does not implement certificate pinning. A compromised CA in the system trust store could perform MITM undetected.
+- **Network path to RSC is trusted.** TLS verification is enforced, but the tool does not implement certificate pinning. A compromised CA in the system trust trust store could perform MITM undetected.
 
 ---
 

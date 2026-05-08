@@ -29,6 +29,7 @@ This tool connects to your RSC instance via the GraphQL API and queries all supp
 | 💾 Resumable phases | Crash at Phase 4? Resume without re-fetching |
 | 📈 Progress reporting | Rate, ETA, and batch status throughout |
 | 🔴 MSSQL event detection | Per-database missed snapshot and missed recoverable range checks |
+| 🔗 Snapshot date inheritance | Child/parent objects inherit snapshot dates where applicable |
 
 ---
 
@@ -196,6 +197,15 @@ Status is determined from multiple signals in priority order:
 | MSSQL: > 5 missed snapshots or ranges | Likely Offline (Many Misses) |
 | MSSQL: any missed snapshots or ranges | Warning (Some Misses) |
 | All clear | Online |
+| No snapshot on child; parent has snapshot | Online (Inherited from Parent) |
+| No snapshot on MongoDB Source/Database; Collection has snapshot | Online (Via Collections) |
+
+> **Note on inherited statuses:** Where a child object (e.g. a PostgreSQL Database or
+> MongoDB Database) has no snapshot of its own but its parent cluster or collection does,
+> the tool inherits the parent's snapshot date and promotes the status accordingly. The
+> original pre-inheritance status is preserved in the `raw_event_status` field across all
+> three report formats so investigators can distinguish genuinely clean databases from
+> those whose status was derived.
 
 ---
 
@@ -220,6 +230,7 @@ All output files are written with `chmod 0o600` (owner read/write only).
 - Sortable columns (click any header)
 - Color-coded status indicators
 - Truncated fields with hover for full text
+- **Raw Status column:** shows the pre-inheritance status for any record whose final status was derived from a parent or child snapshot, blank for records not affected by inheritance
 
 ---
 
@@ -243,6 +254,15 @@ RSC GraphQL API
 |   - Smart field discovery      |
 |   - Adaptive pagination        |
 |   - Parallel workers           |
++---------------+----------------+
+                |
+                v
++--------------------------------+
+|   Snapshot Date Inheritance    |
+|   - Child inherits from parent |
+|   - MongoDB Source/DB from     |
+|     Collections                |
+|   - raw_event_status preserved |
 +---------------+----------------+
                 |
                 v
@@ -326,6 +346,9 @@ This tool was reviewed against **OWASP Top 10 (2021)**, **NIST SP 800-53 Rev.5**
 - Raw API response bodies and exception details are never printed to stdout. All error messages are sanitised before display.
 - If more than 10% of MSSQL event checks fail, a prominent warning is emitted — systematic failures (lost permissions, connectivity issues) cannot silently produce zeroed-out results.
 
+### Audit Trail Integrity
+- The original protection status of each database is preserved in `raw_event_status` before any inheritance-based mutation occurs. This field is included in all three report outputs (CSV, JSON, HTML) so the pre-inheritance signal is never lost.
+
 ### Dependency Auditing
 All dependencies are pinned to exact versions in `requirements.txt`. Run a local audit with:
 
@@ -358,6 +381,9 @@ The tool respects `Retry-After` headers and uses a token bucket rate limiter. If
 
 **"Invalid --input path" error**
 The `--input` file must be inside the configured work directory (`DB_STATUS_WORK_DIR`). Paths outside this directory are rejected for security reasons.
+
+**"Online (Inherited from Parent)" or "Online (Via Collections)" in status**
+These statuses appear when a child database object has no snapshot of its own but its parent cluster or MongoDB Collection does. The original pre-inheritance status is in the `raw_event_status` field. If you want to investigate the underlying protection gap, filter on `raw_event_status` in the CSV or JSON output.
 
 ---
 

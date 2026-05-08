@@ -28,6 +28,10 @@ def inherit_snapshot_dates(databases: list) -> list:
     2. For child objects without snapshot dates, look up parent via physicalPath
     3. For MongoDB Sources without dates, look up children (Collections) and use newest
     4. For MySQL instances without snapshot data, query their instance
+
+    SECURITY AU-9: original event_status is preserved in raw_event_status before
+    any inheritance mutation so investigators can distinguish a genuinely clean
+    database from one whose status was derived from a parent/child snapshot.
     """
     print("\n[*] Phase 3b: Inheriting snapshot dates from parent/child...")
 
@@ -71,7 +75,9 @@ def inherit_snapshot_dates(databases: list) -> list:
                 if parent.get("newest_snapshot"):
                     db["newest_snapshot"] = parent["newest_snapshot"]
                     db["oldest_snapshot"] = parent.get("oldest_snapshot", "")
-                    # Update status based on inherited snapshot
+                    # SECURITY AU-9: preserve original status before mutation
+                    if "raw_event_status" not in db:
+                        db["raw_event_status"] = db.get("event_status", "")
                     if "No Snapshots" in db.get("event_status", ""):
                         db["event_status"] = "Online (Inherited from Parent)"
                     inherited_from_parent += 1
@@ -116,6 +122,9 @@ def inherit_snapshot_dates(databases: list) -> list:
             dates = source_children_dates[source_id]
             if dates:
                 db["newest_snapshot"] = max(dates)  # Most recent
+                # SECURITY AU-9: preserve original status before mutation
+                if "raw_event_status" not in db:
+                    db["raw_event_status"] = db.get("event_status", "")
                 if "No Snapshots" in db.get("event_status", ""):
                     db["event_status"] = "Online (Via Collections)"
                 inherited_from_child += 1
@@ -152,9 +161,18 @@ def inherit_snapshot_dates(databases: list) -> list:
             dates = db_children_dates[db["id"]]
             if dates:
                 db["newest_snapshot"] = max(dates)
+                # SECURITY AU-9: preserve original status before mutation
+                if "raw_event_status" not in db:
+                    db["raw_event_status"] = db.get("event_status", "")
                 if "No Snapshots" in db.get("event_status", ""):
                     db["event_status"] = "Online (Via Collections)"
                 inherited_from_child += 1
+
+    # Ensure raw_event_status is populated for every record, even those not
+    # touched by inheritance, so report consumers always have the field present.
+    for db in databases:
+        if "raw_event_status" not in db:
+            db["raw_event_status"] = db.get("event_status", "")
 
     print(f"    Inherited from parent: {inherited_from_parent}")
     print(f"    Inherited from children: {inherited_from_child}")
@@ -218,12 +236,15 @@ def run_full():
                 print(f"    ⚠️ Parse error: {str(e)[:80]}")
     print(f"    Parsed {len(databases)} records ({parse_errors} errors)")
 
-    # Phase 3b: Inherit snapshot dates
-    databases = inherit_snapshot_dates(databases)
-
-    # Clean up raw nodes to save memory before saving
-    for db in databases:
-        db.pop("_raw_node", None)
+    # Phase 3b: Inherit snapshot dates.
+    # SECURITY ISO A.8.28: _raw_node cleanup is in a try/finally block so it
+    # is guaranteed to run even if inherit_snapshot_dates() raises an exception,
+    # preventing raw GraphQL node data from persisting beyond this phase.
+    try:
+        databases = inherit_snapshot_dates(databases)
+    finally:
+        for db in databases:
+            db.pop("_raw_node", None)
 
     # Save intermediate
     with open(INTERMEDIATE_FILE, "w", encoding="utf-8") as f:

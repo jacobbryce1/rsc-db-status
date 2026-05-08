@@ -1,6 +1,8 @@
 """Interactive HTML report with filtering and dashboard.
 SECURITY: All values escaped with html.escape() before insertion (F-01).
 SECURITY: Content-Security-Policy meta tag added (F-10).
+SECURITY AU-9: raw_event_status column included so the pre-inheritance
+status is preserved and visible to investigators alongside the final status.
 """
 import html as html_mod
 from datetime import datetime
@@ -44,6 +46,8 @@ margin:20px;background:#f5f7fa;color:#1a1a2e}}
 h1{{color:#1a237e;border-bottom:3px solid #00897b;padding-bottom:10px}}
 .note{{background:#e3f2fd;padding:12px 16px;border-radius:6px;
 margin-bottom:20px;font-size:13px;border-left:4px solid #1565c0}}
+.note-warn{{background:#fff8e1;border-left:4px solid #f9a825;
+padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:12px}}
 .g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
 gap:16px;margin-bottom:24px}}
 .c{{background:white;border-radius:8px;padding:20px;
@@ -73,6 +77,7 @@ text-overflow:ellipsis}}
 .st-off{{color:#dc2626;font-weight:500}}
 .st-warn{{color:#ea580c;font-weight:500}}
 .st-rel{{color:#9ca3af;font-style:italic}}
+.st-raw{{color:#6b7280;font-size:11px;font-style:italic}}
 </style>
 </head>
 <body>
@@ -84,6 +89,13 @@ text-overflow:ellipsis}}
 missed snapshot events, missed recoverable range events,
 snapshot recency ({_e(STALE_SNAPSHOT_DAYS)}d threshold), SLA pause status,
 and cloud native state. MSSQL event lookback: {_e(MISSED_SNAPSHOT_LOOKBACK_HOURS)}h.
+</div>
+
+<div class="note-warn">
+<strong>Pre-inheritance status (Raw Status column):</strong> Where snapshot dates are
+inherited from a parent or child object, the original status before inheritance is shown
+in the Raw Status column. An empty Raw Status means the final status was not derived
+from inheritance.
 </div>
 
 <div class="g">
@@ -121,6 +133,7 @@ and cloud native state. MSSQL event lookback: {_e(MISSED_SNAPSHOT_LOOKBACK_HOURS
 <th onclick="st(7)">Newest Snapshot</th>
 <th onclick="st(8)">Missed</th>
 <th onclick="st(9)">Status</th>
+<th onclick="st(10)">Raw Status</th>
 </tr></thead>
 <tbody id="tb">
 """
@@ -131,6 +144,12 @@ and cloud native state. MSSQL event lookback: {_e(MISSED_SNAPSHOT_LOOKBACK_HOURS
         unp_short = _e(unp[:25] + "..." if len(unp) > 25 else unp)
         status    = db.get("event_status", "")
         status_e  = _e(status)
+        # SECURITY AU-9: raw_event_status — show only when it differs from the
+        # final status (i.e., inheritance actually changed the value).
+        raw_status     = db.get("raw_event_status", "") or ""
+        raw_status_e   = _e(raw_status)
+        show_raw       = raw_status and raw_status != status
+        raw_status_display = raw_status_e if show_raw else ""
         status_class = (
             "st-on"   if "Online"  in status else
             "st-off"  if "Offline" in status else
@@ -157,6 +176,7 @@ and cloud native state. MSSQL event lookback: {_e(MISSED_SNAPSHOT_LOOKBACK_HOURS
             f'<td>{snap}</td>\n'
             f'<td>{missed}</td>\n'
             f'<td class="{status_class}">{status_e}</td>\n'
+            f'<td class="st-raw">{raw_status_display}</td>\n'
             f'</tr>\n'
         )
 

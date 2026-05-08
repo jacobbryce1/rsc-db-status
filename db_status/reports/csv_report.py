@@ -2,6 +2,8 @@
 
 SECURITY F-05: output file created with 0o600 permissions so only the
 running user can read the exported database metadata.
+SECURITY AU-9: raw_event_status field included so the pre-inheritance
+status is preserved alongside the final derived status.
 """
 import csv
 import os
@@ -11,6 +13,7 @@ CSV_FIELDS = [
     "is_relic", "recovery_model", "unprotected_reason",
     "newest_snapshot", "oldest_snapshot", "sla_pause_status",
     "total_missed_snapshots", "total_missed_ranges", "event_status",
+    "raw_event_status",
     "db_engine", "region", "instance_class", "service_tier",
     "native_name", "cloud_state",
 ]
