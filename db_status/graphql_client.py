@@ -1,9 +1,13 @@
 """
 GraphQL execution with retry, rate limiting, and error handling.
+
+SECURITY F-03: verify=True on all requests; SSLError never retried.
+SECURITY F-06: response bodies never printed raw; exceptions sanitized.
 """
 import time
 import threading
 import requests
+import requests.exceptions
 from .config import RSC_GRAPHQL_URL
 from .auth import TokenManager
 
@@ -35,7 +39,6 @@ class RateLimiter:
                 self.tokens -= 1.0
 
 
-# Module-level rate limiter
 _rate_limiter = RateLimiter(calls_per_second=10)
 
 
@@ -43,6 +46,21 @@ def set_rate_limit(calls_per_second: int):
     """Update the global rate limiter."""
     global _rate_limiter
     _rate_limiter = RateLimiter(calls_per_second=calls_per_second)
+
+
+def _safe_error_message(response: requests.Response) -> str:
+    """
+    SECURITY F-06: extract only the message field from an API error response.
+    Never return the full response body — it may contain request echoes with
+    variable values (GraphQL variables, partial credentials, etc.).
+    """
+    try:
+        body = response.json()
+        msg = body.get("message") or body.get("error") or ""
+        return str(msg)[:200]   # bounded, field-specific, not raw body
+    except Exception:
+        # Return only the status code — no body at all if JSON parse fails
+        return f"(non-JSON response, status {response.status_code})"
 
 
 def execute_graphql(token_manager: TokenManager, query: str,
@@ -61,62 +79,73 @@ def execute_graphql(token_manager: TokenManager, query: str,
 
         try:
             response = requests.post(
-                RSC_GRAPHQL_URL, json=payload,
-                headers=headers, timeout=60
+                RSC_GRAPHQL_URL,
+                json=payload,
+                headers=headers,
+                timeout=60,
+                verify=True,   # SECURITY F-03: explicit TLS verification
             )
+
+        # SECURITY F-03: TLS errors are fatal — never retry, never suppress.
+        except requests.exceptions.SSLError as e:
+            raise RuntimeError(
+                "TLS certificate verification failed during GraphQL call. "
+                "Do not disable SSL verification."
+            ) from e
+
         except requests.exceptions.Timeout:
-            print(f"    ⚠️ Timeout (attempt {attempt+1}/{max_retries})")
-            time.sleep(2 ** attempt)
-            continue
-        except requests.exceptions.ConnectionError as e:
-            print(f"    ⚠️ Connection error (attempt {attempt+1}): "
-                  f"{str(e)[:100]}")
+            print(f"    Warning: request timeout (attempt {attempt+1}/{max_retries})")
             time.sleep(2 ** attempt)
             continue
 
-        # Handle expired token
+        except requests.exceptions.ConnectionError:
+            # SECURITY F-06: don't log the exception str (contains URL + details)
+            print(f"    Warning: connection error (attempt {attempt+1}/{max_retries})")
+            time.sleep(2 ** attempt)
+            continue
+
+        # Expired token
         if response.status_code in (401, 403):
-            print(f"    ⚠️ Token expired, refreshing...")
+            print("    Warning: token rejected, refreshing...")
             token_manager.force_refresh()
             continue
 
-        # Handle rate limiting
+        # Rate limit
         if response.status_code == 429:
             retry_after = int(response.headers.get("Retry-After", 5))
-            print(f"    ⚠️ Rate limited. Waiting {retry_after}s...")
+            print(f"    Warning: rate limited, waiting {retry_after}s...")
             time.sleep(retry_after)
             continue
 
-        # Handle server errors
+        # Server errors
         if response.status_code >= 500:
-            print(f"    ⚠️ Server error {response.status_code} "
-                  f"(attempt {attempt+1})")
+            print(f"    Warning: server error {response.status_code} "
+                  f"(attempt {attempt+1}/{max_retries})")
             time.sleep(2 ** attempt)
             continue
 
         if response.status_code != 200:
-            try:
-                error_detail = response.json().get("message",
-                                                    response.text[:500])
-            except Exception:
-                error_detail = response.text[:500]
-            raise Exception(f"HTTP {response.status_code}: {error_detail}")
+            # SECURITY F-06: use _safe_error_message, not response.text
+            raise RuntimeError(
+                f"HTTP {response.status_code}: {_safe_error_message(response)}"
+            )
 
         result = response.json()
 
         if "errors" in result and "data" not in result:
-            raise Exception(
-                f"GraphQL errors: {result['errors']}")
+            # Extract only the message fields — not full error objects
+            msgs = [e.get("message", "")[:100] for e in result["errors"]]
+            raise RuntimeError(f"GraphQL error: {'; '.join(msgs)}")
 
         if "errors" in result and "data" in result:
             for err in result["errors"]:
                 msg = err.get("message", "")[:100]
                 if "features enabled" in msg.lower():
-                    raise Exception(f"Feature not licensed: {msg}")
+                    raise RuntimeError(f"Feature not licensed: {msg}")
 
         return result.get("data") or {}
 
-    raise Exception(f"Failed after {max_retries} retries")
+    raise RuntimeError(f"GraphQL call failed after {max_retries} retries")
 
 
 def test_query(token_manager: TokenManager, query: str, variables: dict):
@@ -130,14 +159,12 @@ def test_query(token_manager: TokenManager, query: str, variables: dict):
         resp = requests.post(
             RSC_GRAPHQL_URL,
             json={"query": query, "variables": variables},
-            headers=headers, timeout=30,
+            headers=headers,
+            timeout=30,
+            verify=True,   # SECURITY F-03
         )
         if resp.status_code != 200:
-            try:
-                msg = resp.json().get("message", "")[:200]
-            except Exception:
-                msg = resp.text[:200]
-            return False, f"HTTP {resp.status_code}: {msg}"
+            return False, f"HTTP {resp.status_code}: {_safe_error_message(resp)}"
         data = resp.json()
         if "errors" in data:
             for err in data.get("errors", []):
@@ -145,7 +172,11 @@ def test_query(token_manager: TokenManager, query: str, variables: dict):
                 if "features enabled" in msg:
                     return False, "Feature not licensed"
             if "data" not in data or not data["data"]:
-                return False, data["errors"][0].get("message", "")[:200]
+                msgs = [e.get("message", "")[:100] for e in data["errors"]]
+                return False, "; ".join(msgs)
         return True, ""
-    except Exception as e:
-        return False, str(e)[:200]
+    except requests.exceptions.SSLError:
+        return False, "TLS verification failed"
+    except Exception:
+        # SECURITY F-06: don't propagate exception details from test probes
+        return False, "Connection failed"

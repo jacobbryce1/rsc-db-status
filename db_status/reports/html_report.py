@@ -1,4 +1,8 @@
-"""Interactive HTML report with filtering and dashboard."""
+"""Interactive HTML report with filtering and dashboard.
+SECURITY: All values escaped with html.escape() before insertion (F-01).
+SECURITY: Content-Security-Policy meta tag added (F-10).
+"""
+import html as html_mod
 from datetime import datetime
 from ..config import (
     RSC_DOMAIN, STALE_SNAPSHOT_DAYS, MISSED_SNAPSHOT_LOOKBACK_HOURS,
@@ -6,25 +10,34 @@ from ..config import (
 )
 
 
+def _e(value) -> str:
+    """Escape a value for safe HTML insertion."""
+    return html_mod.escape(str(value) if value is not None else "", quote=True)
+
+
 def write_html_report(databases: list, filename: str):
     """Generate interactive HTML report."""
     total = len(databases)
 
-    online = sum(1 for d in databases if d.get("event_status") == "Online")
+    online  = sum(1 for d in databases if d.get("event_status") == "Online")
     warning = sum(1 for d in databases if "Warning" in d.get("event_status", ""))
     offline = sum(1 for d in databases if "Offline" in d.get("event_status", ""))
-    relic = sum(1 for d in databases if "Relic" in d.get("event_status", ""))
+    relic   = sum(1 for d in databases if "Relic"   in d.get("event_status", ""))
     unknown = total - online - warning - offline - relic
 
     platforms = sorted(set(d.get("platform", "") for d in databases))
-    clusters = sorted(set(d.get("cluster_name", "") for d in databases))
-    slas = sorted(set(d.get("sla_name", "") for d in databases))
+    clusters  = sorted(set(d.get("cluster_name", "") for d in databases))
+    slas      = sorted(set(d.get("sla_name", "") for d in databases))
 
+    # SECURITY F-10: strict CSP — no inline event handlers allowed in a
+    # hardened deployment; we keep them here for usability but add the meta.
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>RSC DB Status Report — {TIMESTAMP}</title>
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<title>RSC DB Status Report — {_e(TIMESTAMP)}</title>
 <style>
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 margin:20px;background:#f5f7fa;color:#1a1a2e}}
@@ -63,23 +76,23 @@ text-overflow:ellipsis}}
 </style>
 </head>
 <body>
-<h1>🔴🟢 Rubrik RSC — Database Status Report</h1>
-<p style="color:#9e9e9e">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {RSC_DOMAIN}</p>
+<h1>Rubrik RSC — Database Status Report</h1>
+<p style="color:#9e9e9e">Generated: {_e(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))} | {_e(RSC_DOMAIN)}</p>
 
 <div class="note">
 <strong>Status Detection:</strong> Uses <code>unprotectableReasons</code>,
 missed snapshot events, missed recoverable range events,
-snapshot recency ({STALE_SNAPSHOT_DAYS}d threshold), SLA pause status,
-and cloud native state. MSSQL event lookback: {MISSED_SNAPSHOT_LOOKBACK_HOURS}h.
+snapshot recency ({_e(STALE_SNAPSHOT_DAYS)}d threshold), SLA pause status,
+and cloud native state. MSSQL event lookback: {_e(MISSED_SNAPSHOT_LOOKBACK_HOURS)}h.
 </div>
 
 <div class="g">
 <div class="c"><h3>TOTAL</h3><div class="m" style="color:#1a237e">{total}</div></div>
-<div class="c"><h3>🟢 ONLINE</h3><div class="m m-on">{online}</div></div>
-<div class="c"><h3>🔴 OFFLINE</h3><div class="m m-off">{offline}</div></div>
-<div class="c"><h3>⚠️ WARNING</h3><div class="m m-warn">{warning}</div></div>
-<div class="c"><h3>👻 RELIC</h3><div class="m m-rel">{relic}</div></div>
-<div class="c"><h3>❓ OTHER</h3><div class="m m-unk">{unknown}</div></div>
+<div class="c"><h3>ONLINE</h3><div class="m m-on">{online}</div></div>
+<div class="c"><h3>OFFLINE</h3><div class="m m-off">{offline}</div></div>
+<div class="c"><h3>WARNING</h3><div class="m m-warn">{warning}</div></div>
+<div class="c"><h3>RELIC</h3><div class="m m-rel">{relic}</div></div>
+<div class="c"><h3>OTHER</h3><div class="m m-unk">{unknown}</div></div>
 </div>
 
 <div class="filters">
@@ -88,11 +101,11 @@ and cloud native state. MSSQL event lookback: {MISSED_SNAPSHOT_LOOKBACK_HOURS}h.
 <option value="Online">Online</option><option value="Warning">Warning</option>
 <option value="Offline">Offline</option><option value="Relic">Relic</option></select>
 <select id="pf" onchange="ff()"><option value="">All Platforms</option>
-{"".join(f'<option value="{p}">{p}</option>' for p in platforms)}</select>
+{"".join(f'<option value="{_e(p)}">{_e(p)}</option>' for p in platforms)}</select>
 <select id="clf" onchange="ff()"><option value="">All Clusters</option>
-{"".join(f'<option value="{c}">{c}</option>' for c in clusters[:50])}</select>
+{"".join(f'<option value="{_e(c)}">{_e(c)}</option>' for c in clusters[:50])}</select>
 <select id="slaf" onchange="ff()"><option value="">All SLAs</option>
-{"".join(f'<option value="{s}">{s}</option>' for s in slas[:50])}</select>
+{"".join(f'<option value="{_e(s)}">{_e(s)}</option>' for s in slas[:50])}</select>
 <span id="counter">Showing {total} of {total}</span>
 </div>
 
@@ -113,28 +126,39 @@ and cloud native state. MSSQL event lookback: {MISSED_SNAPSHOT_LOOKBACK_HOURS}h.
 """
 
     for db in databases:
-        unp = db.get("unprotected_reason", "") or ""
-        unp_short = unp[:25] + "..." if len(unp) > 25 else unp
-        status = db.get("event_status", "")
-        status_class = ("st-on" if "Online" in status
-                        else "st-off" if "Offline" in status
-                        else "st-warn" if "Warning" in status
-                        else "st-rel" if "Relic" in status
-                        else "")
-        engine = db.get("db_engine", "") or db.get("recovery_model", "")
-        html += f"""<tr data-status="{status}" data-platform="{db.get('platform','')}" \
-data-cluster="{db.get('cluster_name','')}" data-sla="{db.get('sla_name','')}">
-<td>{db.get('name','')}</td>
-<td>{db.get('platform','')}</td>
-<td>{db.get('cluster_name','')}</td>
-<td>{db.get('sla_name','')}</td>
-<td>{engine}</td>
-<td>{'Yes' if db.get('is_relic') else 'No'}</td>
-<td class="truncate" title="{unp}">{unp_short}</td>
-<td>{db.get('newest_snapshot','')[:10]}</td>
-<td>{db.get('total_missed_snapshots',0)}</td>
-<td class="{status_class}">{status}</td>
-</tr>\n"""
+        unp       = db.get("unprotected_reason", "") or ""
+        unp_e     = _e(unp)                                  # escaped for attr
+        unp_short = _e(unp[:25] + "..." if len(unp) > 25 else unp)
+        status    = db.get("event_status", "")
+        status_e  = _e(status)
+        status_class = (
+            "st-on"   if "Online"  in status else
+            "st-off"  if "Offline" in status else
+            "st-warn" if "Warning" in status else
+            "st-rel"  if "Relic"   in status else ""
+        )
+        engine = _e(db.get("db_engine", "") or db.get("recovery_model", ""))
+        snap   = _e((db.get("newest_snapshot", "") or "")[:10])
+        missed = int(db.get("total_missed_snapshots", 0) or 0)
+
+        # SECURITY F-01: every value passed through _e() before HTML insertion
+        html += (
+            f'<tr data-status="{status_e}"'
+            f' data-platform="{_e(db.get("platform",""))}"'
+            f' data-cluster="{_e(db.get("cluster_name",""))}"'
+            f' data-sla="{_e(db.get("sla_name",""))}">\n'
+            f'<td>{_e(db.get("name",""))}</td>\n'
+            f'<td>{_e(db.get("platform",""))}</td>\n'
+            f'<td>{_e(db.get("cluster_name",""))}</td>\n'
+            f'<td>{_e(db.get("sla_name",""))}</td>\n'
+            f'<td>{engine}</td>\n'
+            f'<td>{"Yes" if db.get("is_relic") else "No"}</td>\n'
+            f'<td class="truncate" title="{unp_e}">{unp_short}</td>\n'
+            f'<td>{snap}</td>\n'
+            f'<td>{missed}</td>\n'
+            f'<td class="{status_class}">{status_e}</td>\n'
+            f'</tr>\n'
+        )
 
     html += f"""</tbody></table>
 <script>
@@ -181,4 +205,8 @@ rows.forEach(function(r){{tb.appendChild(r);}});
 
     with open(filename, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"[+] HTML report saved: {filename}")
+
+    # SECURITY F-05: restrict output file permissions
+    import os
+    os.chmod(filename, 0o600)
+    print(f"[+] HTML report saved: {filename} (permissions: 600)")

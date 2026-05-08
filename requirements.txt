@@ -1,2 +1,10 @@
-requests>=2.28.0
-urllib3>=1.26.0
+# RSC DB Status Tool — pinned dependencies
+# SECURITY F-04: exact versions pinned to prevent silent supply-chain upgrades.
+# To update: run `pip install -U requests urllib3 certifi`, verify tests pass,
+# then run `pip freeze | grep -E "^(requests|urllib3|certifi)==" > requirements.txt`
+#
+# Audit regularly: pip install pip-audit && pip-audit
+
+requests==2.32.3
+urllib3==2.2.3
+certifi==2024.12.14    # explicit CA bundle — avoids system CA trust issues

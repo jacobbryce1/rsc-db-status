@@ -1,18 +1,30 @@
-"""Phase 4 only: Run MSSQL event checks from intermediate file."""
+"""Phase 4 only: Run MSSQL event checks from intermediate file.
+
+SECURITY F-02: intermediate file path validated via safe_input_path().
+SECURITY F-05: updated intermediate file written with secure_open_write().
+"""
 import json
 from ..config import (
-    INTERMEDIATE_FILE, EVENTS_FILE, get_scale_profile,
-    ENABLE_MSSQL_EVENT_CHECKS
+    INTERMEDIATE_FILE, INTERMEDIATE_DIR, EVENTS_FILE,
+    get_scale_profile, ENABLE_MSSQL_EVENT_CHECKS
 )
 from ..auth import TokenManager
 from ..graphql_client import set_rate_limit
 from ..events import batched_event_check
+from ..security import safe_input_path, secure_open_write
 
 
 def run_events(intermediate_file: str = None):
     """Load intermediate, run event checks, update file."""
     if intermediate_file is None:
         intermediate_file = INTERMEDIATE_FILE
+
+    # SECURITY F-02: validate the path is inside the work directory
+    try:
+        intermediate_file = safe_input_path(intermediate_file, INTERMEDIATE_DIR)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"[!] {e}")
+        return
 
     if not ENABLE_MSSQL_EVENT_CHECKS:
         print("[*] Event checks globally disabled.")
@@ -21,7 +33,7 @@ def run_events(intermediate_file: str = None):
     token_manager = TokenManager(buffer_seconds=60)
     token_manager.get_token()
 
-    with open(intermediate_file, "r") as f:
+    with open(intermediate_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     databases = data["databases"]
@@ -40,19 +52,19 @@ def run_events(intermediate_file: str = None):
     print(f"[*] Checking {len(mssql_ids)} MSSQL databases...")
     event_results = batched_event_check(token_manager, mssql_ids, profile)
 
-    # Merge back
+    # Merge results back into the database list
     for db in databases:
         if db["id"] in event_results:
             ev = event_results[db["id"]]
             db["total_missed_snapshots"] = ev.get("total_missed_snapshots", 0)
-            db["total_missed_ranges"] = ev.get("total_missed_ranges", 0)
-            db["event_status"] = ev.get("event_status", "Error")
+            db["total_missed_ranges"]    = ev.get("total_missed_ranges", 0)
+            db["event_status"]           = ev.get("event_status", "Error")
 
-    # Overwrite intermediate
-    with open(intermediate_file, "w") as f:
+    # SECURITY F-05: write with restricted permissions (0o600)
+    with secure_open_write(intermediate_file) as f:
         json.dump(data, f, indent=2, default=str)
 
-    with open(EVENTS_FILE, "w") as f:
+    with secure_open_write(EVENTS_FILE) as f:
         json.dump(event_results, f, indent=2, default=str)
 
-    print(f"[+] Events merged and saved.")
+    print("[+] Events merged and saved.")
