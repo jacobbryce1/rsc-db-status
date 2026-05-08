@@ -1,13 +1,22 @@
 """
 Platform definitions — all supported database types.
 Snapshot field mappings based on RSC schema introspection discovery.
+
+Key findings from discovery:
+- MSSQL uses cdmNewestSnapshot/cdmOldestSnapshot (not newestSnapshot/oldestSnapshot)
+- Oracle, SAP HANA, Db2, Exchange use newestSnapshot/oldestSnapshot
+- PostgreSQL Databases, MySQL Databases, MongoDB Databases are child objects (no snapshot fields)
+- MongoDB Sources have 0 snapshots — protection is at Collection level
+- Azure SQL MI newestSnapshot requires backupLocationId arg (returns null without it)
+- GCP Cloud SQL, AWS RDS, Azure SQL DB use newestSnapshot/oldestSnapshot
+- AWS RDS static query fails validation — use smart discovery instead
 """
 
 # ============================================================
 # STATIC QUERIES
 # ============================================================
 
-# MSSQL — Uses cdmNewestSnapshot/cdmOldestSnapshot (NOT newestSnapshot/oldestSnapshot)
+# MSSQL — Uses cdmNewestSnapshot/cdmOldestSnapshot
 MSSQL_QUERY = """
 query($first: Int!, $after: String, $filter: [Filter!]) {
     mssqlDatabases(first: $first, after: $after, filter: $filter) {
@@ -218,43 +227,11 @@ query($first: Int!, $after: String) {
 }
 """
 
-# AWS RDS — Uses newestSnapshot/oldestSnapshot
-AWS_RDS_QUERY = """
-query($first: Int!, $after: String) {
-    awsNativeRdsInstances(first: $first, after: $after) {
-        count
-        edges { node {
-            id
-            name
-            nativeName
-            isRelic
-            dbEngine
-            dbInstanceClass
-            region
-            vpcId
-            allocatedStorageInGibi
-            dbiResourceId
-            status
-            slaPauseStatus
-            configuredSlaDomain { id name }
-            effectiveRetentionSlaDomain { id name }
-            effectiveSlaDomain { id name }
-            effectiveSlaSourceObject { fid name objectType }
-            rscNativeObjectPendingSla { id name }
-            physicalPath { fid name objectType }
-            logicalPath { fid name objectType }
-            oldestSnapshot { id date }
-            newestSnapshot { id date }
-        } }
-        pageInfo { endCursor hasNextPage }
-    }
-}
-"""
-
 # ============================================================
-# CANDIDATE FIELDS — For Smart Query Builder
+# CANDIDATE FIELDS — For Smart Query Builder (dynamic platforms)
 # ============================================================
 
+# PostgreSQL DB Clusters — Has newestSnapshot/oldestSnapshot
 POSTGRES_CLUSTER_CANDIDATE_FIELDS = [
     "isRelic",
     "slaPauseStatus",
@@ -272,7 +249,7 @@ POSTGRES_CLUSTER_CANDIDATE_FIELDS = [
     "latestUserNote { userNote time }",
 ]
 
-# PostgreSQL Databases — NO snapshot fields available (child objects)
+# PostgreSQL Databases — NO snapshot fields (child of cluster)
 POSTGRES_DB_CANDIDATE_FIELDS = [
     "isRelic",
     "slaPauseStatus",
@@ -286,8 +263,8 @@ POSTGRES_DB_CANDIDATE_FIELDS = [
     "logicalPath { fid name objectType }",
 ]
 
-# MySQL Databases — NO snapshot fields available (child objects)
-MYSQL_CANDIDATE_FIELDS = [
+# MySQL Databases — NO snapshot fields (child of instance)
+MYSQL_DB_CANDIDATE_FIELDS = [
     "isRelic",
     "slaPauseStatus",
     "cluster { id name }",
@@ -300,7 +277,25 @@ MYSQL_CANDIDATE_FIELDS = [
     "logicalPath { fid name objectType }",
 ]
 
-# MongoDB Sources — Fields exist but may be null (source-level protection)
+# MySQL Instances — Has snapshot fields (parent of MySQL Databases)
+MYSQL_INSTANCE_CANDIDATE_FIELDS = [
+    "isRelic",
+    "slaPauseStatus",
+    "cluster { id name }",
+    "configuredSlaDomain { id name }",
+    "effectiveSlaDomain { id name }",
+    "effectiveSlaSourceObject { fid name objectType }",
+    "effectiveRetentionSlaDomain { id name }",
+    "pendingSla { id name }",
+    "physicalPath { fid name objectType }",
+    "logicalPath { fid name objectType }",
+    "oldestSnapshot { id date }",
+    "newestSnapshot { id date }",
+    "cdmNewestSnapshot { id date }",
+    "cdmOldestSnapshot { id date }",
+]
+
+# MongoDB Sources — newestSnapshot exists but always null (0 snapshots at source level)
 MONGO_SOURCE_CANDIDATE_FIELDS = [
     "isRelic",
     "slaPauseStatus",
@@ -314,7 +309,7 @@ MONGO_SOURCE_CANDIDATE_FIELDS = [
     "newestSnapshot { id date }",
 ]
 
-# MongoDB Databases — NO snapshot fields available (child objects)
+# MongoDB Databases — NO snapshot fields (child of source)
 MONGO_DATABASE_CANDIDATE_FIELDS = [
     "isRelic",
     "slaPauseStatus",
@@ -340,6 +335,7 @@ MONGO_COLLECTION_CANDIDATE_FIELDS = [
     "oldestSnapshot { id date }",
 ]
 
+# Azure SQL MI — newestSnapshot requires backupLocationId arg (may return null)
 AZURE_SQL_MI_CANDIDATE_FIELDS = [
     "isRelic",
     "databaseName",
@@ -357,6 +353,30 @@ AZURE_SQL_MI_CANDIDATE_FIELDS = [
     "newestIndexedSnapshot { id date }",
 ]
 
+# AWS RDS Instances — Smart discovery (static query fails validation on some RSC builds)
+AWS_RDS_CANDIDATE_FIELDS = [
+    "nativeName",
+    "isRelic",
+    "dbEngine",
+    "dbInstanceClass",
+    "region",
+    "vpcId",
+    "allocatedStorageInGibi",
+    "dbiResourceId",
+    "status",
+    "slaPauseStatus",
+    "configuredSlaDomain { id name }",
+    "effectiveRetentionSlaDomain { id name }",
+    "effectiveSlaDomain { id name }",
+    "effectiveSlaSourceObject { fid name objectType }",
+    "rscNativeObjectPendingSla { id name }",
+    "physicalPath { fid name objectType }",
+    "logicalPath { fid name objectType }",
+    "oldestSnapshot { id date }",
+    "newestSnapshot { id date }",
+]
+
+# AWS Aurora Clusters
 AWS_AURORA_CANDIDATE_FIELDS = [
     "nativeName",
     "isRelic",
@@ -375,16 +395,19 @@ AWS_AURORA_CANDIDATE_FIELDS = [
     "newestSnapshot { id date }",
 ]
 
+# Cassandra Keyspaces
 CASSANDRA_KEYSPACE_CANDIDATE_FIELDS = [
     "cluster { id name }",
     "effectiveSlaDomain { id name }",
 ]
 
 # ============================================================
-# PLATFORM LIST
+# PLATFORM LIST — Complete Coverage
 # ============================================================
 PLATFORMS = [
-    # --- On-prem / CDM-managed (Static Queries) ---
+    # -------------------------------------------------------
+    # On-prem / CDM-managed (Static Queries)
+    # -------------------------------------------------------
     {
         "name": "MSSQL Databases",
         "query": MSSQL_QUERY,
@@ -431,7 +454,9 @@ PLATFORMS = [
         "has_events": False,
     },
 
-    # --- On-prem (Smart Discovery) ---
+    # -------------------------------------------------------
+    # On-prem (Smart Discovery)
+    # -------------------------------------------------------
     {
         "name": "PostgreSQL DB Clusters",
         "query": None,
@@ -451,16 +476,27 @@ PLATFORMS = [
         "has_events": False,
     },
     {
+        "name": "MySQL Instances",
+        "query": None,
+        "query_name": "mysqlInstances",
+        "candidate_fields": MYSQL_INSTANCE_CANDIDATE_FIELDS,
+        "data_key": "mysqlInstances",
+        "uses_filter": True,
+        "has_events": False,
+    },
+    {
         "name": "MySQL Databases",
         "query": None,
         "query_name": "mysqlDatabases",
-        "candidate_fields": MYSQL_CANDIDATE_FIELDS,
+        "candidate_fields": MYSQL_DB_CANDIDATE_FIELDS,
         "data_key": "mysqlDatabases",
         "uses_filter": True,
         "has_events": False,
     },
 
-    # --- MongoDB ---
+    # -------------------------------------------------------
+    # MongoDB (3 hierarchy levels)
+    # -------------------------------------------------------
     {
         "name": "MongoDB Sources",
         "query": None,
@@ -489,7 +525,9 @@ PLATFORMS = [
         "has_events": False,
     },
 
-    # --- Cloud-native: Azure ---
+    # -------------------------------------------------------
+    # Cloud-native: Azure
+    # -------------------------------------------------------
     {
         "name": "Azure SQL Databases",
         "query": AZURE_SQL_DB_QUERY,
@@ -509,7 +547,9 @@ PLATFORMS = [
         "has_events": False,
     },
 
-    # --- Cloud-native: GCP ---
+    # -------------------------------------------------------
+    # Cloud-native: GCP
+    # -------------------------------------------------------
     {
         "name": "GCP Cloud SQL Instances",
         "query": GCP_CLOUD_SQL_QUERY,
@@ -520,12 +560,14 @@ PLATFORMS = [
         "has_events": False,
     },
 
-    # --- Cloud-native: AWS ---
+    # -------------------------------------------------------
+    # Cloud-native: AWS (Smart Discovery — static query fails validation)
+    # -------------------------------------------------------
     {
         "name": "AWS RDS Instances",
-        "query": AWS_RDS_QUERY,
+        "query": None,
         "query_name": "awsNativeRdsInstances",
-        "candidate_fields": [],
+        "candidate_fields": AWS_RDS_CANDIDATE_FIELDS,
         "data_key": "awsNativeRdsInstances",
         "uses_filter": False,
         "has_events": False,
@@ -540,7 +582,9 @@ PLATFORMS = [
         "has_events": False,
     },
 
-    # --- Cassandra ---
+    # -------------------------------------------------------
+    # Cassandra
+    # -------------------------------------------------------
     {
         "name": "Cassandra Sources",
         "query": None,

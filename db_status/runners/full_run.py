@@ -19,6 +19,149 @@ from ..reports.json_report import write_json_report
 from ..reports.html_report import write_html_report
 
 
+def inherit_snapshot_dates(databases: list) -> list:
+    """
+    Post-processing: Inherit snapshot dates between parent/child objects.
+
+    Strategy:
+    1. Build lookup: id → database record (with snapshot dates)
+    2. For child objects without snapshot dates, look up parent via physicalPath
+    3. For MongoDB Sources without dates, look up children (Collections) and use newest
+    4. For MySQL instances without snapshot data, query their instance
+    """
+    print("\n[*] Phase 3b: Inheriting snapshot dates from parent/child...")
+
+    # Build lookup by ID
+    db_by_id = {}
+    for db in databases:
+        db_by_id[db["id"]] = db
+
+    # Track inheritance stats
+    inherited_from_parent = 0
+    inherited_from_child = 0
+
+    # --- Step 1: Child inherits from parent ---
+    # PostgreSQL Databases → PostgreSQL DB Clusters
+    # MySQL Databases → MySQL Instances (via physicalPath)
+    # MongoDB Databases → MongoDB Sources (via physicalPath)
+    for db in databases:
+        # Skip if already has snapshot data
+        if db.get("newest_snapshot"):
+            continue
+
+        # Skip relics
+        if db.get("is_relic"):
+            continue
+
+        # Get the raw node to access physicalPath
+        # physicalPath is stored in the raw node, we need to look it up
+        # The parse_node function doesn't currently preserve physicalPath,
+        # so we'll use the _raw_node if available
+        raw_node = db.get("_raw_node", {})
+        physical_path = raw_node.get("physicalPath", []) or []
+
+        if not physical_path:
+            continue
+
+        # Find parent in our lookup
+        for path_entry in physical_path:
+            parent_fid = path_entry.get("fid", "")
+            if parent_fid and parent_fid in db_by_id:
+                parent = db_by_id[parent_fid]
+                if parent.get("newest_snapshot"):
+                    db["newest_snapshot"] = parent["newest_snapshot"]
+                    db["oldest_snapshot"] = parent.get("oldest_snapshot", "")
+                    # Update status based on inherited snapshot
+                    if "No Snapshots" in db.get("event_status", ""):
+                        db["event_status"] = "Online (Inherited from Parent)"
+                    inherited_from_parent += 1
+                    break
+
+    # --- Step 2: Parent inherits from children (MongoDB Sources) ---
+    # MongoDB Sources have 0 snapshots themselves but their Collections do
+    # Find the newest snapshot across all children for each source
+
+    # Build: source_id → list of child collection snapshot dates
+    source_children_dates = {}
+    for db in databases:
+        if db.get("platform") != "MongoDB Collections":
+            continue
+        if not db.get("newest_snapshot"):
+            continue
+
+        raw_node = db.get("_raw_node", {})
+        physical_path = raw_node.get("physicalPath", []) or []
+
+        for path_entry in physical_path:
+            if path_entry.get("objectType") == "MONGO_SOURCE":
+                source_fid = path_entry.get("fid", "")
+                if source_fid:
+                    if source_fid not in source_children_dates:
+                        source_children_dates[source_fid] = []
+                    source_children_dates[source_fid].append(
+                        db["newest_snapshot"])
+                break
+
+    # Apply to MongoDB Sources
+    for db in databases:
+        if db.get("platform") != "MongoDB Sources":
+            continue
+        if db.get("newest_snapshot"):
+            continue
+        if db.get("is_relic"):
+            continue
+
+        source_id = db["id"]
+        if source_id in source_children_dates:
+            dates = source_children_dates[source_id]
+            if dates:
+                db["newest_snapshot"] = max(dates)  # Most recent
+                if "No Snapshots" in db.get("event_status", ""):
+                    db["event_status"] = "Online (Via Collections)"
+                inherited_from_child += 1
+
+    # Also apply to MongoDB Databases from their Collections
+    db_children_dates = {}
+    for db in databases:
+        if db.get("platform") != "MongoDB Collections":
+            continue
+        if not db.get("newest_snapshot"):
+            continue
+
+        raw_node = db.get("_raw_node", {})
+        physical_path = raw_node.get("physicalPath", []) or []
+
+        for path_entry in physical_path:
+            if path_entry.get("objectType") == "MONGO_DATABASE":
+                db_fid = path_entry.get("fid", "")
+                if db_fid:
+                    if db_fid not in db_children_dates:
+                        db_children_dates[db_fid] = []
+                    db_children_dates[db_fid].append(db["newest_snapshot"])
+                break
+
+    for db in databases:
+        if db.get("platform") != "MongoDB Databases":
+            continue
+        if db.get("newest_snapshot"):
+            continue
+        if db.get("is_relic"):
+            continue
+
+        if db["id"] in db_children_dates:
+            dates = db_children_dates[db["id"]]
+            if dates:
+                db["newest_snapshot"] = max(dates)
+                if "No Snapshots" in db.get("event_status", ""):
+                    db["event_status"] = "Online (Via Collections)"
+                inherited_from_child += 1
+
+    print(f"    Inherited from parent: {inherited_from_parent}")
+    print(f"    Inherited from children: {inherited_from_child}")
+
+    return databases
+
+
 def run_full():
     """Execute all phases end-to-end."""
     print("=" * 60)
@@ -65,12 +208,22 @@ def run_full():
     parse_errors = 0
     for node in raw_nodes:
         try:
-            databases.append(parse_node(node))
+            parsed = parse_node(node)
+            # Preserve raw node for physicalPath inheritance
+            parsed["_raw_node"] = node
+            databases.append(parsed)
         except Exception as e:
             parse_errors += 1
             if parse_errors <= 5:
                 print(f"    ⚠️ Parse error: {str(e)[:80]}")
     print(f"    Parsed {len(databases)} records ({parse_errors} errors)")
+
+    # Phase 3b: Inherit snapshot dates
+    databases = inherit_snapshot_dates(databases)
+
+    # Clean up raw nodes to save memory before saving
+    for db in databases:
+        db.pop("_raw_node", None)
 
     # Save intermediate
     with open(INTERMEDIATE_FILE, "w", encoding="utf-8") as f:
