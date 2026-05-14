@@ -15,9 +15,24 @@ env/
 # Output files
 db_status_work/
 *.csv
-*.json
 db_status_report_*
 *.html
+
+# Encrypted disk cache — key file is a secret; data file is ciphertext tied to it
+.db_status_cache.key
+.db_status_cache.bin
+
+# Any custom cache paths set via CACHE_FILE / CACHE_KEY_FILE env vars
+*.cache.key
+*.cache.bin
+
+# Intermediate JSON and log files
+*.json
+db_status.log
+*.log
+
+# API discovery / dev scripts (not part of the tool)
+discover_api_filters*.py
 
 # macOS
 .DS_Store

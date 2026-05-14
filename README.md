@@ -27,6 +27,7 @@ This tool connects to your RSC instance via the GraphQL API and queries all supp
 | 🚦 Rate limiting | Respects API limits with token bucket algorithm |
 | 🔍 Smart field discovery | Gracefully handles unlicensed or unavailable features |
 | 💾 Resumable phases | Crash at Phase 4? Resume without re-fetching |
+| 🔁 Incremental refresh | Re-fetch only changed records since last run (no full scan needed) |
 | 📈 Progress reporting | Rate, ETA, and batch status throughout |
 | 🔴 MSSQL event detection | Per-database missed snapshot and missed recoverable range checks |
 | 🔗 Snapshot date inheritance | Child/parent objects inherit snapshot dates where applicable |
@@ -173,11 +174,40 @@ All tunable settings live in `config.py`:
 | Command | Description |
 |---------|-------------|
 | `python -m db_status run` | Full end-to-end run (all phases) |
+| `python -m db_status run --force-refresh` | Full run, bypassing the disk cache |
+| `python -m db_status refresh` | Incremental refresh — activity-based targeted re-fetch + age re-evaluation |
+| `python -m db_status refresh --age-only` | Instant: recalculate staleness thresholds with zero API calls |
 | `python -m db_status fetch` | Phase 1–3: fetch and parse only, save intermediate |
 | `python -m db_status events --input FILE` | Phase 4: MSSQL event checks from intermediate file |
 | `python -m db_status report --input FILE` | Phase 5: generate reports from intermediate file |
 | `python -m db_status count` | Quick count of all platforms (no data fetched) |
 | `python -m db_status test` | Test connectivity and license status per platform |
+
+### Incremental Refresh (Fast Updates)
+
+After your first full run, you can update the report without re-fetching all data:
+
+```bash
+# Standard refresh: query activity since last run, re-fetch only changed records
+python -m db_status refresh
+
+# Instant: recalculate staleness thresholds only (zero API calls)
+python -m db_status refresh --age-only
+```
+
+**How it works:**
+
+The refresh uses two complementary paths:
+
+**PATH C — Age re-evaluation** (always runs): Recalculates `event_status` for every cached record against today's date. This catches databases that have crossed a staleness threshold since the last full run (e.g. a database that was "Online" two days ago is now "Warning (Stale: 8d)"). No API calls.
+
+**PATH A — Targeted re-fetch** (skipped with `--age-only`): Queries `activitySeriesConnection` since the last cache timestamp, identifies which database FIDs had activity, then uses the `OBJECT_ID` filter to re-fetch only those specific records. Supported for all on-prem platforms (MSSQL, Oracle, SAP HANA, Db2, Exchange, PostgreSQL, MySQL, MongoDB). Cloud-native platforms (Azure, GCP, AWS) don't support targeted filtering, so they're updated by the next full run.
+
+**Typical refresh time:** seconds to a few minutes, compared to 15–30+ minutes for a full run on large environments.
+
+> **First run required:** `refresh` operates on the encrypted disk cache. Run `python -m db_status run` at least once before using `refresh`. Use `python -m db_status run --force-refresh` to force a fresh full pull when you want a complete update.
+
+---
 
 ### Phased Execution (Recommended for Large Environments)
 
@@ -325,6 +355,7 @@ rsc-db-status/
 │   ├── runners/
 │   │   ├── __init__.py
 │   │   ├── full_run.py             # All phases end-to-end
+│   │   ├── refresh_run.py          # Incremental refresh (PATH A + PATH C)
 │   │   ├── fetch_only.py           # Phase 1–3 only
 │   │   ├── events_only.py          # Phase 4 only
 │   │   └── report_only.py          # Phase 5 only
@@ -407,8 +438,8 @@ Timeouts now trigger an immediate page-size halving (not waiting for 3 failures)
 **HTML report is very large or slow to load**
 The HTML report now uses virtual scrolling — all records are embedded as compact JSON and only the visible rows (~30–50) exist in the DOM at any time. File size is proportional to data, not DOM structure (64K records ≈ 10–15 MB). If the report is still large, the data itself may contain very long field values — use the CSV export for those cases.
 
-**Re-running takes too long**
-After the first successful fetch, parsed records are saved to an AES-encrypted disk cache (`.db_status_cache.bin`). Subsequent runs within `CACHE_TTL_HOURS` (default: 12h) load from cache and skip the API fetch entirely, going straight to event checks and report generation.
+**Re-running takes too long / want a faster update**
+After the first successful fetch, parsed records are saved to an AES-encrypted disk cache (`.db_status_cache.bin`). Subsequent runs within `CACHE_TTL_HOURS` (default: 12h) load from cache and skip the API fetch entirely. For intraday updates, use `python -m db_status refresh` — it re-fetches only records that had activity since the last run rather than pulling everything again. For a purely instant staleness recalculation with zero API calls, use `python -m db_status refresh --age-only`.
 
 **"Online (Inherited from Parent)" or "Online (Via Collections)" in status**
 These statuses appear when a child database object has no snapshot of its own but its parent cluster or MongoDB Collection does. The original pre-inheritance status is in the `raw_event_status` field. If you want to investigate the underlying protection gap, filter on `raw_event_status` in the CSV or JSON output.

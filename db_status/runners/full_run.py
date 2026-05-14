@@ -10,7 +10,7 @@ from ..config import (
     CACHE_FILE, CACHE_KEY_FILE, CACHE_TTL_HOURS,
     MAX_PAGE_SIZE, MAX_WORKERS,
 )
-from ..cache import load_cache, save_cache
+from ..cache import load_cache, save_cache, clear_cache
 
 logger = logging.getLogger("db_status.runner")
 from ..auth import TokenManager
@@ -186,7 +186,7 @@ def inherit_snapshot_dates(databases: list) -> list:
     return databases
 
 
-def run_full():
+def run_full(force_refresh: bool = False):
     """Execute all phases end-to-end."""
     print("=" * 60)
     print("  🔴🟢 Rubrik RSC — Database Status Report")
@@ -205,6 +205,10 @@ def run_full():
         print(f"[*] Env overrides active: {', '.join(overrides)}")
 
     # ── Cache check ─────────────────────────────────────────────────────────
+    if force_refresh:
+        print("[*] --force-refresh: clearing cache and re-fetching from API.")
+        clear_cache(CACHE_FILE, CACHE_KEY_FILE)
+
     cached = load_cache(CACHE_FILE, CACHE_KEY_FILE, CACHE_TTL_HOURS)
     if cached:
         databases = cached["databases"]

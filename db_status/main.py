@@ -10,6 +10,9 @@ def main():
         epilog="""
 Examples:
   python -m db_status run              Full end-to-end run
+  python -m db_status run --force-refresh  Full run, ignore cache
+  python -m db_status refresh          Incremental refresh (activity + age)
+  python -m db_status refresh --age-only  Instant: recalculate staleness only
   python -m db_status fetch            Fetch only (save intermediate)
   python -m db_status events           Event checks from intermediate
   python -m db_status report           Generate reports from intermediate
@@ -20,7 +23,20 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
     # Full run
-    subparsers.add_parser("run", help="Full end-to-end run (all phases)")
+    run_p = subparsers.add_parser("run", help="Full end-to-end run (all phases)")
+    run_p.add_argument(
+        "--force-refresh", action="store_true",
+        help="Ignore the disk cache and re-fetch all data from the API"
+    )
+
+    # Incremental refresh
+    refresh_p = subparsers.add_parser(
+        "refresh",
+        help="Incremental refresh: re-evaluate staleness + targeted API update")
+    refresh_p.add_argument(
+        "--age-only", action="store_true",
+        help="Recalculate staleness thresholds only — zero API calls (instant)"
+    )
 
     # Individual phases
     subparsers.add_parser("fetch", help="Phase 1-3: Fetch and parse only")
@@ -43,7 +59,13 @@ Examples:
 
     if args.command == "run" or args.command is None:
         from .runners.full_run import run_full
-        run_full()
+        force_refresh = getattr(args, "force_refresh", False)
+        run_full(force_refresh=force_refresh)
+
+    elif args.command == "refresh":
+        from .runners.refresh_run import run_refresh
+        age_only = getattr(args, "age_only", False)
+        run_refresh(age_only=age_only)
 
     elif args.command == "fetch":
         from .runners.fetch_only import run_fetch
