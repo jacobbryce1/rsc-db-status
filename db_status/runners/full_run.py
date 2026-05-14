@@ -2,11 +2,17 @@
 import os
 import json
 import time
+import logging
 from ..config import (
     get_scale_profile, INTERMEDIATE_DIR, INTERMEDIATE_FILE,
     EVENTS_FILE, OUTPUT_CSV, OUTPUT_JSON, OUTPUT_HTML,
-    ENABLE_MSSQL_EVENT_CHECKS
+    ENABLE_MSSQL_EVENT_CHECKS,
+    CACHE_FILE, CACHE_KEY_FILE, CACHE_TTL_HOURS,
+    MAX_PAGE_SIZE, MAX_WORKERS,
 )
+from ..cache import load_cache, save_cache
+
+logger = logging.getLogger("db_status.runner")
 from ..auth import TokenManager
 from ..graphql_client import set_rate_limit
 from ..pagination import get_platform_count, fetch_all_platforms_parallel
@@ -190,6 +196,31 @@ def run_full():
     os.makedirs(INTERMEDIATE_DIR, exist_ok=True)
     start_time = time.time()
 
+    if MAX_PAGE_SIZE or MAX_WORKERS:
+        overrides = []
+        if MAX_PAGE_SIZE:
+            overrides.append(f"MAX_PAGE_SIZE={MAX_PAGE_SIZE}")
+        if MAX_WORKERS:
+            overrides.append(f"MAX_WORKERS={MAX_WORKERS}")
+        print(f"[*] Env overrides active: {', '.join(overrides)}")
+
+    # ── Cache check ─────────────────────────────────────────────────────────
+    cached = load_cache(CACHE_FILE, CACHE_KEY_FILE, CACHE_TTL_HOURS)
+    if cached:
+        databases = cached["databases"]
+        meta      = cached.get("metadata", {})
+        print(f"\n[✓] Loaded {len(databases):,} databases from cache "
+              f"(age: {meta.get('age_hint', '?')}, "
+              f"profile: {meta.get('profile', '?')})")
+        print("[*] Skipping Phases 1–3 (fetch & parse). "
+              "Run with --force-refresh to re-fetch.")
+        token_manager = TokenManager(buffer_seconds=60)
+        token_manager.get_token()
+        profile_label = meta.get("profile", "cached")
+        # Jump straight to Phase 4
+        _run_phases_4_5(databases, token_manager, profile_label, start_time)
+        return
+
     # Initialize token manager
     token_manager = TokenManager(buffer_seconds=60)
     token_manager.get_token()
@@ -255,8 +286,29 @@ def run_full():
         }, f, indent=2, default=str)
     print(f"[+] Intermediate saved: {INTERMEDIATE_FILE}")
 
+    # Save to encrypted disk cache
+    saved = save_cache(
+        databases,
+        {"profile": profile["label"]},
+        CACHE_FILE,
+        CACHE_KEY_FILE,
+    )
+    if saved:
+        print(f"[+] Cache updated: {CACHE_FILE}")
+    else:
+        print("[!] Cache not saved (cryptography package not installed or write error)")
+
+    _run_phases_4_5(databases, token_manager, profile["label"], start_time)
+
+
+def _run_phases_4_5(databases: list, token_manager, profile_label: str,
+                    start_time: float):
+    """Run event checks (Phase 4) and report generation (Phase 5)."""
+
+    profile_event_checks = isinstance(profile_label, str) and "small" not in profile_label.lower()
+
     # Phase 4: Event checks
-    if ENABLE_MSSQL_EVENT_CHECKS and profile["event_checks"]:
+    if ENABLE_MSSQL_EVENT_CHECKS and profile_event_checks:
         print("\n[*] Phase 4: MSSQL event checks...")
         mssql_ids = [
             db["id"] for db in databases
@@ -264,8 +316,15 @@ def run_full():
         ]
         if mssql_ids:
             print(f"    {len(mssql_ids)} MSSQL databases to check")
+            # Build a minimal profile dict for event checks
+            from ..config import SCALE_PROFILES
+            _profile = next(
+                (p for p in SCALE_PROFILES.values()
+                 if p["label"] == profile_label),
+                SCALE_PROFILES["xxlarge"]
+            )
             event_results = batched_event_check(
-                token_manager, mssql_ids, profile)
+                token_manager, mssql_ids, _profile)
             for db in databases:
                 if db["id"] in event_results:
                     ev = event_results[db["id"]]
@@ -280,8 +339,7 @@ def run_full():
         else:
             print("    No MSSQL databases to check.")
     else:
-        reason = ("disabled for scale" if not profile.get("event_checks")
-                  else "globally disabled")
+        reason = "disabled for scale" if not profile_event_checks else "globally disabled"
         print(f"\n[*] Phase 4: Event checks {reason}.")
 
     # Phase 5: Reports
@@ -301,7 +359,7 @@ def run_full():
     print(f"  Total databases: {len(databases)}")
     print(f"  Total time: {total_time:.1f}s")
     print(f"  Token refreshes: {token_stats['refresh_count']}")
-    print(f"  Scale profile: {profile['label']}")
+    print(f"  Scale profile: {profile_label}")
     if total_time > 0:
         print(f"  Rate: {len(databases)/total_time:.1f} DBs/sec")
     print(f"  Output:")

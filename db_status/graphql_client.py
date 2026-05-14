@@ -8,7 +8,7 @@ import time
 import threading
 import requests
 import requests.exceptions
-from .config import RSC_GRAPHQL_URL
+from .config import RSC_GRAPHQL_URL, REQUEST_TIMEOUT
 from .auth import TokenManager
 
 
@@ -82,7 +82,7 @@ def execute_graphql(token_manager: TokenManager, query: str,
                 RSC_GRAPHQL_URL,
                 json=payload,
                 headers=headers,
-                timeout=60,
+                timeout=REQUEST_TIMEOUT,
                 verify=True,   # SECURITY F-03: explicit TLS verification
             )
 

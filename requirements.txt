@@ -8,3 +8,5 @@
 requests==2.32.3
 urllib3==2.2.3
 certifi==2024.12.14    # explicit CA bundle — avoids system CA trust issues
+cryptography==44.0.3   # AES-encrypted disk cache (Fernet)
+python-dotenv==1.1.0   # load credentials from .env file

@@ -5,7 +5,10 @@ SECURITY F-07: RSC_DOMAIN validated against strict regex at import time.
 import os
 import re
 import sys
+import logging
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
 # ============================================================
 # RSC CONNECTION
@@ -64,6 +67,24 @@ OUTPUT_JSON = f"db_status_report_{TIMESTAMP}.json"
 OUTPUT_HTML = f"db_status_report_{TIMESTAMP}.html"
 
 # ============================================================
+# LOGGING
+# ============================================================
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_FILE  = os.environ.get("LOG_FILE", "")   # e.g. db_status.log; empty = console only
+
+_handlers = [logging.StreamHandler(sys.stdout)]
+if LOG_FILE:
+    _handlers.append(logging.FileHandler(LOG_FILE, encoding="utf-8"))
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=_handlers,
+)
+logger = logging.getLogger("db_status")
+
+# ============================================================
 # BEHAVIOR
 # ============================================================
 PAGE_SIZE                      = 200
@@ -76,6 +97,27 @@ MISSED_SNAPSHOT_LOOKBACK_HOURS = 72
 # SECURITY F-09: error rate threshold — if more than this fraction of
 # event checks fail, emit a prominent warning in the report.
 EVENT_ERROR_RATE_THRESHOLD = 0.10
+
+# ============================================================
+# WORKER / PAGE SIZE OVERRIDES
+# ============================================================
+# These cap the scale profile defaults. Useful when the profile is too
+# aggressive for a specific RSC instance (e.g. repeated upstream timeouts).
+# Set to 0 to use the profile default.
+MAX_PAGE_SIZE   = int(os.environ.get("MAX_PAGE_SIZE", "0")) or None   # 0 = profile default
+MAX_WORKERS     = int(os.environ.get("MAX_WORKERS",   "0")) or None   # 0 = profile default
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "120"))       # seconds per API call
+MIN_PAGE_SIZE   = int(os.environ.get("MIN_PAGE_SIZE", "25"))          # floor for adaptive reduction
+
+# ============================================================
+# DISK CACHE
+# ============================================================
+# Parsed database records are cached to an AES-encrypted file after each
+# successful fetch. Subsequent runs load from cache (skipping the 2-hour
+# API fetch) until the cache expires. Requires the `cryptography` package.
+CACHE_TTL_HOURS = float(os.environ.get("CACHE_TTL_HOURS", "12"))
+CACHE_FILE      = os.environ.get("CACHE_FILE",     ".db_status_cache.bin")
+CACHE_KEY_FILE  = os.environ.get("CACHE_KEY_FILE", ".db_status_cache.key")
 
 # ============================================================
 # SCALE PROFILES
@@ -110,21 +152,21 @@ SCALE_PROFILES = {
     },
     "xlarge": {
         "label": "XLarge (10K-50K)",
-        "page_size": 1000,
-        "max_workers": 12,
+        "page_size": 500,
+        "max_workers": 8,
         "batch_size": 500,
         "stream_to_disk": True,
         "event_checks": True,
-        "rate_limit": 15,
+        "rate_limit": 12,
     },
     "xxlarge": {
         "label": "XXLarge (50K-100K+)",
-        "page_size": 1000,
-        "max_workers": 16,
+        "page_size": 500,
+        "max_workers": 8,
         "batch_size": 1000,
         "stream_to_disk": True,
         "event_checks": False,
-        "rate_limit": 15,
+        "rate_limit": 12,
     },
 }
 

@@ -44,7 +44,7 @@ We aim to acknowledge reports within **3 business days** and provide a fix or mi
 
 ### Credential Handling
 
-- All credentials (`RSC_DOMAIN`, `RSC_CLIENT_ID`, `RSC_CLIENT_SECRET`) are loaded exclusively from environment variables or a `.env` file — never hardcoded in source.
+- All credentials (`RSC_DOMAIN`, `RSC_CLIENT_ID`, `RSC_CLIENT_SECRET`) are loaded exclusively from environment variables or a `.env` file via `python-dotenv` — never hardcoded in source.
 - `RSC_DOMAIN` is validated against a strict hostname regex at startup. An invalid, missing, or placeholder value raises an immediate error and halts execution, preventing credential redirection to attacker-controlled hosts.
 - The `.env` file is listed in `.gitignore` and must never be committed to version control.
 - Token values are never written to stdout, log files, or exception messages. Only TTL metadata (duration in seconds) is logged.
@@ -75,11 +75,22 @@ We aim to acknowledge reports within **3 business days** and provide a fix or mi
 - Paths that resolve outside the work directory are rejected with a clear error. This prevents `--input ../../../../etc/passwd` style traversal attacks.
 - The validation uses `pathlib.Path.resolve()` and `Path.relative_to()` — symbolic link traversal is handled correctly.
 
+### Encrypted Disk Cache
+
+- After each successful fetch and parse, all database records are written to an AES-256 encrypted cache file (`.db_status_cache.bin`) using the `cryptography` library's Fernet symmetric encryption scheme.
+- A random 256-bit key is generated on first run and written to `.db_status_cache.key` with `chmod 0o600` (owner read/write only). The cache data file is opaque ciphertext — it cannot be read without the key file.
+- Both `.db_status_cache.bin` and `.db_status_cache.key` are excluded from version control via `.gitignore`.
+- If the `cryptography` package is unavailable, disk cache is disabled gracefully — the tool continues without persistence rather than falling back to plaintext storage.
+- The cache is subject to a configurable TTL (`CACHE_TTL_HOURS`, default 12h). Expired caches are ignored and regenerated on the next run.
+
+> **Treat `.db_status_cache.key` like a password.** It is the sole decryption key for the cache. Deleting it invalidates the cache file and forces a fresh API fetch on the next run.
+
 ### HTML Report Security
 
-- All database field values written into the HTML report are escaped with `html.escape(..., quote=True)` before insertion. This covers all data-attribute values, table cell contents, option element values, and hover title attributes — including the `raw_event_status` field added in Phase 3b.
+- The HTML report uses a virtual scrolling architecture: all records are serialised as a JSON array embedded in a `<script>` tag. Only visible rows (~30–50 at any time) are rendered in the DOM by JavaScript.
+- Field values in the JSON payload are serialised via Python's `json.dumps()`, which handles all necessary escaping. Values inserted directly into HTML (headers, notes) are escaped with `html.escape(..., quote=True)`.
 - The generated HTML includes a `Content-Security-Policy` meta tag restricting resource loading to prevent exfiltration via injected markup.
-- A malicious RSC database name containing `<script>` tags will render as escaped text, not execute as JavaScript.
+- A malicious RSC database name containing `<script>` tags will be serialised as a JSON string literal and rendered as text by the virtual scroller — it will not execute as JavaScript.
 
 ### Audit Trail Integrity
 
@@ -102,6 +113,8 @@ We aim to acknowledge reports within **3 business days** and provide a fix or mi
 ### Dependency Management
 
 - All dependencies are pinned to exact versions in `requirements.txt`, including `certifi` for an explicit CA bundle.
+- `python-dotenv` is used solely to load the `.env` file at startup — it has no network access and no write capability.
+- `cryptography` provides the Fernet AES-256 implementation for the disk cache. No other use of the cryptography package is made.
 - `pip-audit` should be run before each release and periodically during development:
 
 ```bash
@@ -116,13 +129,15 @@ pip-audit -r requirements.txt
 | File | Contents | Protected by |
 |------|----------|--------------|
 | `.env` | RSC credentials | `.gitignore`, OS file permissions |
+| `.db_status_cache.key` | Fernet AES-256 encryption key | `.gitignore`, `chmod 0o600` |
+| `.db_status_cache.bin` | AES-encrypted parsed database records | `.gitignore`, `chmod 0o600`, ciphertext |
 | `db_status_work/raw_fetch_*.json` | Parsed database metadata | `.gitignore`, `chmod 0o600` |
 | `db_status_work/events_*.json` | MSSQL event check results | `.gitignore`, `chmod 0o600` |
 | `db_status_report_*.csv` | Full database status export (incl. `raw_event_status`) | `chmod 0o600` |
 | `db_status_report_*.json` | Full database status export (incl. `raw_event_status`) | `chmod 0o600` |
 | `db_status_report_*.html` | Interactive HTML dashboard (incl. Raw Status column) | `chmod 0o600` |
 
-> Intermediate files in `db_status_work/` contain raw database metadata fetched from RSC. Treat them with the same sensitivity as the final reports.
+> Intermediate files in `db_status_work/` and the disk cache contain database metadata fetched from RSC. Treat them with the same sensitivity as the final reports. The cache files (`.db_status_cache.*`) should be backed up separately if you need cache persistence across reinstalls — deleting `.db_status_cache.key` permanently invalidates the cache data file.
 
 ---
 

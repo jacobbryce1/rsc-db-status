@@ -63,8 +63,8 @@ The tool automatically detects your environment size and selects the appropriate
 | Small | < 1K | 200 | 2 | 50 | ~30 seconds |
 | Medium | 1K–5K | 500 | 4 | 100 | ~2 minutes |
 | Large | 5K–10K | 1,000 | 8 | 200 | ~4 minutes |
-| XLarge | 10K–50K | 1,000 | 12 | 500 | ~12 minutes |
-| XXLarge | 50K–100K+ | 1,000 | 16 | 1,000 | ~20 minutes |
+| XLarge | 10K–50K | 500 | 8 | 500 | ~15 minutes |
+| XXLarge | 50K–100K+ | 500 | 8 | 1,000 | ~25 minutes |
 
 ---
 
@@ -90,19 +90,24 @@ git clone https://github.com/jacobbryce1/rsc-db-status.git
 cd rsc-db-status
 
 # Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Configure credentials
 cp .env.example .env
-# Edit .env with your RSC credentials
+# Edit .env — credentials are loaded automatically at startup via python-dotenv
+
+# Test connectivity
+python -m db_status test
 
 # Run
 python -m db_status run
 ```
+
+> **Note:** The `.env` file is loaded automatically — no `export` or `source` needed. Add `MAX_PAGE_SIZE` and `MAX_WORKERS` to your `.env` if you experience upstream timeouts (see Troubleshooting).
 
 ---
 
@@ -149,6 +154,15 @@ All tunable settings live in `config.py`:
 | `ENABLE_MSSQL_EVENT_CHECKS` | `True` | Per-DB event queries for MSSQL |
 | `MISSED_SNAPSHOT_LOOKBACK_HOURS` | 72 | Event lookback window |
 | `EVENT_ERROR_RATE_THRESHOLD` | 0.10 | Warn if >10% of event checks fail |
+| `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `LOG_FILE` | *(unset)* | Path to write logs to a file (in addition to console) |
+| `MAX_PAGE_SIZE` | *(profile default)* | Hard cap on API page size regardless of scale profile. Set to `100` for restrictive RSC instances that return upstream timeouts. |
+| `MAX_WORKERS` | *(profile default)* | Hard cap on parallel workers. Set to `1` for a conservative single-threaded run. |
+| `REQUEST_TIMEOUT` | `120` | Per-request timeout in seconds. |
+| `MIN_PAGE_SIZE` | `25` | Floor for the adaptive page-size reduction. |
+| `CACHE_TTL_HOURS` | `12` | How long the encrypted disk cache is considered fresh. Subsequent runs within this window skip the API fetch entirely. |
+| `CACHE_FILE` | `.db_status_cache.bin` | Path for the encrypted cache data file. |
+| `CACHE_KEY_FILE` | `.db_status_cache.key` | Path for the Fernet encryption key (mode 0o600). |
 
 ---
 
@@ -382,6 +396,20 @@ The tool respects `Retry-After` headers and uses a token bucket rate limiter. If
 **"Invalid --input path" error**
 The `--input` file must be inside the configured work directory (`DB_STATUS_WORK_DIR`). Paths outside this directory are rejected for security reasons.
 
+**Upstream timeouts / API not responding on large environments**
+The tool auto-selects a scale profile based on DB count, but some RSC instances reject large page sizes regardless of environment size. Add these to your `.env` to dial back API pressure:
+```dotenv
+MAX_PAGE_SIZE=100
+MAX_WORKERS=1
+```
+Timeouts now trigger an immediate page-size halving (not waiting for 3 failures), and the floor has been lowered from 50 to 25. If you're still hitting limits, try `MAX_PAGE_SIZE=50`.
+
+**HTML report is very large or slow to load**
+The HTML report now uses virtual scrolling — all records are embedded as compact JSON and only the visible rows (~30–50) exist in the DOM at any time. File size is proportional to data, not DOM structure (64K records ≈ 10–15 MB). If the report is still large, the data itself may contain very long field values — use the CSV export for those cases.
+
+**Re-running takes too long**
+After the first successful fetch, parsed records are saved to an AES-encrypted disk cache (`.db_status_cache.bin`). Subsequent runs within `CACHE_TTL_HOURS` (default: 12h) load from cache and skip the API fetch entirely, going straight to event checks and report generation.
+
 **"Online (Inherited from Parent)" or "Online (Via Collections)" in status**
 These statuses appear when a child database object has no snapshot of its own but its parent cluster or MongoDB Collection does. The original pre-inheritance status is in the `raw_event_status` field. If you want to investigate the underlying protection gap, filter on `raw_event_status` in the CSV or JSON output.
 
@@ -414,10 +442,10 @@ pip-audit -r requirements.txt
 
 ```bash
 cd rsc-db-status
-source venv/bin/activate
+source .venv/bin/activate
 git pull
 pip install -r requirements.txt    # picks up any new pinned deps
-./run.sh
+python -m db_status run
 ```
 
 ---

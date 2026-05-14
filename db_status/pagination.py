@@ -3,16 +3,29 @@ Paginated data fetching with adaptive page sizing and retry logic.
 """
 import time
 import threading
+import logging
+import requests.exceptions
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .auth import TokenManager
 from .graphql_client import execute_graphql, test_query
 from .query_builder import discover_working_query
-from .config import PAGE_SIZE
+from .config import PAGE_SIZE, MAX_PAGE_SIZE, MAX_WORKERS, MIN_PAGE_SIZE
+
+logger = logging.getLogger("db_status.pagination")
 
 
 def paginated_fetch(token_manager: TokenManager, query: str, data_key: str,
                     uses_filter: bool = True, page_size: int = PAGE_SIZE) -> list:
-    """Paginated fetch with adaptive page size and retry logic."""
+    """Paginated fetch with adaptive page size and retry logic.
+
+    Timeout errors trigger an immediate page-size halving (not waiting for 3
+    consecutive failures) because timeouts indicate the API is struggling with
+    request size, not transient connectivity issues.
+    """
+    # Apply env var cap over whatever the profile passed in
+    if MAX_PAGE_SIZE:
+        page_size = min(page_size, MAX_PAGE_SIZE)
+
     all_nodes = []
     has_next_page = True
     cursor = None
@@ -42,6 +55,8 @@ def paginated_fetch(token_manager: TokenManager, query: str, data_key: str,
             for edge in edges:
                 all_nodes.append(edge["node"])
 
+            logger.info("Page %d: %d items (Total: %d/%s, page_size=%d)",
+                        page, len(edges), len(all_nodes), total_count, page_size)
             print(f"    Page {page}: {len(edges)} items "
                   f"(Total: {len(all_nodes)}/{total_count})")
 
@@ -50,17 +65,48 @@ def paginated_fetch(token_manager: TokenManager, query: str, data_key: str,
             consecutive_errors = 0
             page += 1
 
-            # Restore page size after success
+            # Gradually restore page size after a run of successes
             if page_size < original_page_size:
                 page_size = min(page_size * 2, original_page_size)
 
-        except Exception as e:
+        except (TimeoutError, requests.exceptions.Timeout, RuntimeError) as e:
+            # Timeouts get immediate halving — they mean the page is too large,
+            # not a transient blip.
+            is_timeout = (
+                isinstance(e, (TimeoutError, requests.exceptions.Timeout))
+                or "timeout" in str(e).lower()
+            )
             consecutive_errors += 1
+            logger.warning("Page %d error (attempt %d): %s",
+                           page, consecutive_errors, str(e)[:120])
             print(f"    ⚠️ Error on page {page} (attempt "
                   f"{consecutive_errors}): {str(e)[:100]}")
 
-            if consecutive_errors >= 3 and page_size > 50:
-                page_size = max(50, page_size // 2)
+            if is_timeout and page_size > MIN_PAGE_SIZE:
+                page_size = max(MIN_PAGE_SIZE, page_size // 2)
+                logger.warning("Timeout detected — reducing page size to %d", page_size)
+                print(f"    ⏱ Timeout — reducing page size to {page_size}")
+                consecutive_errors = 0
+            elif consecutive_errors >= 3 and page_size > MIN_PAGE_SIZE:
+                page_size = max(MIN_PAGE_SIZE, page_size // 2)
+                logger.warning("Repeated errors — reducing page size to %d", page_size)
+                print(f"    ⚠️ Reducing page size to {page_size}")
+                consecutive_errors = 0
+            elif consecutive_errors >= 6:
+                raise Exception(
+                    f"Too many failures at page {page}: {e}")
+
+            time.sleep(2 ** min(consecutive_errors, 5))
+
+        except Exception as e:
+            consecutive_errors += 1
+            logger.warning("Page %d error (attempt %d): %s",
+                           page, consecutive_errors, str(e)[:120])
+            print(f"    ⚠️ Error on page {page} (attempt "
+                  f"{consecutive_errors}): {str(e)[:100]}")
+
+            if consecutive_errors >= 3 and page_size > MIN_PAGE_SIZE:
+                page_size = max(MIN_PAGE_SIZE, page_size // 2)
                 print(f"    ⚠️ Reducing page size to {page_size}")
                 consecutive_errors = 0
             elif consecutive_errors >= 6:
@@ -175,8 +221,14 @@ def fetch_all_platforms_parallel(token_manager: TokenManager,
     page_size = profile["page_size"]
     max_workers = min(profile["max_workers"], len(platforms))
 
+    # Apply env var cap over profile default
+    if MAX_WORKERS:
+        max_workers = min(max_workers, MAX_WORKERS)
+    effective_page_size = min(page_size, MAX_PAGE_SIZE) if MAX_PAGE_SIZE else page_size
+
+    logger.info("Fetching platforms: workers=%d, page_size=%d", max_workers, effective_page_size)
     print(f"\n[*] Fetching platforms in parallel "
-          f"(workers={max_workers}, page_size={page_size})")
+          f"(workers={max_workers}, page_size={effective_page_size})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
